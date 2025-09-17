@@ -12,19 +12,26 @@ def get_sst():
                 'surface_temperatures' : np.asarray([293.75, 294.16, 294.55, 295.08, 295.57, 296.1, 296.55, 297.02, 297.54, 298.06, 298.44, 298.8, 299.17])}
     return SST_dict
 
-def sorter(member, include_spinup=False):
+def pre_sorter(member, sc_thresh, cu_thresh, include_spinup=False):
     if include_spinup:
         member.cloud_fraction = member.ds.cloud_frac
         member.rwp = member.ds.rwp
     else:
         member.cloud_fraction = member.ds.cloud_frac[1:]
         member.rwp = member.ds.rwp[5:]
+
+    sorter(member, sc_thresh, cu_thresh)
+
+def sorter(member, sc_thresh, cu_thresh):
+    ### Averaging code - come back to this
+    # member.cloud_fraction = member.cloud_fraction.rolling({'time_coarse':3}, center=True).mean()
+    # member.cloud_fraction = member.cloud_fraction[1:-1]
     
     # Does the simulation form Sc?
-    if any(member.cloud_fraction > 0.9):
+    if any(member.cloud_fraction > sc_thresh):
         member.sc = True
         # Which indices have Sc?
-        sc, = np.where(member.cloud_fraction > 0.9)
+        sc, = np.where(member.cloud_fraction > sc_thresh)
         member.sc_ind = sc[0]
         member.sc_time = member.cloud_fraction.time_coarse[member.sc_ind].data
 
@@ -32,15 +39,15 @@ def sorter(member, include_spinup=False):
         member.sc_fine_index = abs(member.rwp.time_fine - member.sc_time).argmin().data
 
         # Out of those indices, which following ones have Cu?
-        cu, = np.where(member.cloud_fraction[member.sc_ind:] < 0.55)
+        cu, = np.where(member.cloud_fraction[member.sc_ind:] < cu_thresh)
         # cu_ind refers to the original simulation indices that have Cu
         cu_inds_after_sc = cu + member.sc_ind
         
         # Does Cu form and the simulation finishes in a Cu state?
-        if len(cu)!=0 and member.cloud_fraction[-1]<0.55:
+        if len(cu)!=0 and member.cloud_fraction[-1] < cu_thresh:
             member.cu = True
             # Does it stay in Cu from the initial Cu formation?
-            if all(member.cloud_fraction[cu_inds_after_sc[0]:] < 0.55):
+            if all(member.cloud_fraction[cu_inds_after_sc[0]:] < cu_thresh):
                 member.cu_ind = cu_inds_after_sc[0]
             # For the case where it recovers from Cu but will eventually return to Cu
             else:
@@ -94,12 +101,20 @@ class ICE_Member:
         self.var_num = var_num
         self.id = f"{root_key}_{var_num}"
         self.inputs = inputs
-        self.ds = xr.open_dataset(f"/gws/nopw/j04/carisma/eers/sct/processed/initial_condition_ensembles/{root_key}_{var_num}/sct_{root_key}_{var_num}_pp.nc")
+        self.ds = xr.open_dataset(f"/gws/nopw/j04/carisma/eers/sct/processed/initial_condition_ensembles/{root_key}/sct_{root_key}_{var_num}_pp.nc")
 
 
 class Ensemble:
-    def __init__(self, include_spinup=False, delete_bad=True):
+    def __init__(self, sc_thresh, cu_thresh, 
+                 include_spinup=False, 
+                 delete_bad=True, 
+                 use_sc_beginning_vals=None, 
+                 find_ssts=None, 
+                 use_ic_ensembles=None):
+
         print("Initiating ensemble...")
+        self.sc_thresh = sc_thresh
+        self.cu_thresh = cu_thresh
         # Assign names and labels
         self.parameter_names = ['qv_bl','inv','delt','delq','na','baut']
         self.parameter_labels = ['$BL~q_{v}$', '$BL~z$', r'$\Delta~\theta$', '$\Delta~q_{v}$', '$BL~N_{a}$', '10^{$b_{aut}$}']
@@ -113,6 +128,12 @@ class Ensemble:
             self.parameter_ranges = [(7,11), (500,1300), (2,21), (-7,-1), (10,500), (-2.3,-1.3)]
         else:
             self.design = np.loadtxt("lh_design/post_spinupvalues/all_post_spinup.csv",delimiter=',',skiprows=1)
+            minimums = [min(column) for column in (self.design.T)]
+            maximums = [max(column) for column in (self.design.T)]
+            self.parameter_ranges = [(pmin,pmax) for pmin,pmax in zip(minimums, maximums)]
+
+        if use_sc_beginning_vals == True:
+            self.design = np.loadtxt("lh_design/post_spinupvalues/all_sc_beginning.csv",delimiter=',',skiprows=1)
             minimums = [min(column) for column in (self.design.T)]
             maximums = [max(column) for column in (self.design.T)]
             self.parameter_ranges = [(pmin,pmax) for pmin,pmax in zip(minimums, maximums)]
@@ -141,7 +162,7 @@ class Ensemble:
                 member.transition_time = None
                 member.rwp_mean = None
             else:
-                sorter(member, include_spinup)
+                pre_sorter(member, self.sc_thresh, self.cu_thresh, include_spinup)
 
             self.member_keys.append(f"{key}{i}")
             if member.cu:
@@ -153,8 +174,16 @@ class Ensemble:
 
         if delete_bad:
             self.design = np.delete(self.design, (6,86,93), axis=0)
-        print("Ensemble initialised.")
+            self.member_keys = set(self.member_keys) ^ set(self.member_bad_keys)
 
+        if find_ssts == True:
+            self.find_initial_ssts()
+
+        if use_ic_ensembles == True:
+            self.load_ice_members()
+            self.replace_members_with_ice_means()
+
+        print("Ensemble initialised.")
 
     # def load_variable_from_merged_nc(self, member, variable_strings):
     #     if member.index < 61:
@@ -203,4 +232,42 @@ class Ensemble:
             for var_num in range(var_length):
                 self.ice_dict_keys[dict_key].append(f"{dict_key}_{var_num}")
                 setattr(self, f"{dict_key}_{var_num}", ICE_Member(dict_key, var_num, vars(self)[f"{dict_key}"].inputs))
-                sorter(vars(self)[f"{dict_key}_{var_num}"], self.include_spinup)
+                pre_sorter(vars(self)[f"{dict_key}_{var_num}"], self.sc_thresh, self.cu_thresh, self.include_spinup)
+
+    def replace_members_with_ice_means(self):
+        for member_key, ice_key_list in self.ice_dict_keys.items():
+            member = vars(self)[member_key]
+            cf_times = np.ones((len(ice_key_list), 65))*(-1)
+            cf_timeseries = np.ones((len(ice_key_list), 65))*(-1)
+            rwp_times = np.ones((len(ice_key_list), 180))*(-1)
+            rwp_timeseries = np.ones((len(ice_key_list), 180))*(-1)
+        
+            for i, ice_key in enumerate(ice_key_list):
+                ice_member = vars(self)[ice_key]
+                cf_timeseries[i,:len(ice_member.cloud_fraction)] = ice_member.cloud_fraction
+                cf_times[i,:len(ice_member.cloud_fraction)] = ice_member.cloud_fraction.time_coarse
+                rwp_timeseries[i,:len(ice_member.rwp)] = ice_member.rwp
+                rwp_times[i,:len(ice_member.rwp)] = ice_member.rwp.time_fine
+        
+            cf_timeseries_nan_mask = np.where(cf_timeseries>0, cf_timeseries, np.nan)
+            cf_times_nan_mask = np.where(cf_times>0, cf_times, np.nan)
+            cf_mean = np.nanmean(cf_timeseries_nan_mask, axis=0)
+            cf_times_mean = np.nanmean(cf_times_nan_mask, axis=0)
+            cf_mean_isnan, = np.where(np.isnan(cf_mean) == False)
+        
+            member.cloud_fraction = xr.DataArray(data=cf_mean[:cf_mean_isnan[-1]+1],
+                                                 dims=["time_coarse"],
+                                                 coords=dict(time_coarse=cf_times_mean[:cf_mean_isnan[-1]+1]),
+                                                 attrs=dict(description="mean cloud_frac of ice"))
+
+            rwp_timeseries_nan_mask = np.where(rwp_timeseries>0, rwp_timeseries, np.nan)
+            rwp_times_nan_mask = np.where(rwp_times>0, rwp_times, np.nan)
+            rwp_mean = np.nanmean(rwp_timeseries_nan_mask, axis=0)
+            rwp_times_mean = np.nanmean(rwp_times_nan_mask, axis=0)
+            rwp_mean_isnan, = np.where(np.isnan(rwp_mean) == False)
+        
+            member.rwp = xr.DataArray(data=rwp_mean[:rwp_mean_isnan[-1]+1],
+                                                 dims=["time_fine"],
+                                                 coords=dict(time_fine=rwp_times_mean[:rwp_mean_isnan[-1]+1]),
+                                                 attrs=dict(description="mean rwp of ice"))
+            sorter(member, self.sc_thresh, self.cu_thresh)
