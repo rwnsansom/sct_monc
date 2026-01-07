@@ -23,10 +23,7 @@ def pre_sorter(member, sc_thresh, cu_thresh, include_spinup=False):
     sorter(member, sc_thresh, cu_thresh)
 
 def sorter(member, sc_thresh, cu_thresh):
-    ### Averaging code - come back to this
-    # member.cloud_fraction = member.cloud_fraction.rolling({'time_coarse':3}, center=True).mean()
-    # member.cloud_fraction = member.cloud_fraction[1:-1]
-    
+
     # Does the simulation form Sc?
     if any(member.cloud_fraction > sc_thresh):
         member.sc = True
@@ -37,6 +34,28 @@ def sorter(member, sc_thresh, cu_thresh):
 
         # Fine resolution time index needed for RWP
         member.sc_fine_index = abs(member.rwp.time_fine - member.sc_time).argmin().data
+
+        # transition beginning
+        if sc[-1] < len(member.cloud_fraction)-1:
+            sc_diff = sc[1:] - sc[:-1]
+            j, = np.where(sc_diff > 1)
+            if len(j) > 0:
+                t_begin_ind = sc[j[0]]
+            else:
+                t_begin_ind = sc[-1]
+    
+            x = [member.cloud_fraction[t_begin_ind+1].data, member.cloud_fraction[t_begin_ind].data]
+            y = [member.cloud_fraction.time_coarse[t_begin_ind+1].data, member.cloud_fraction.time_coarse[t_begin_ind].data]
+    
+            member.t_begin_ind = t_begin_ind
+            member.t_begin_time = np.interp(sc_thresh, x, y)
+            member.t_begin_time_sc = member.t_begin_time - member.sc_time
+            member.t_begin_ind_fine = abs(member.rwp.time_fine - member.t_begin_time).argmin().data
+        else:
+            member.t_begin_ind = None
+            member.t_begin_time = None
+            member.t_begin_time_sc = None
+            member.t_begin_ind_fine = None
 
         # Out of those indices, which following ones have Cu?
         cu, = np.where(member.cloud_fraction[member.sc_ind:] < cu_thresh)
@@ -59,10 +78,12 @@ def sorter(member, sc_thresh, cu_thresh):
 
             member.cu_time = member.cloud_fraction.time_coarse[member.cu_ind].data
             member.transition_time = member.cu_time - member.sc_time
+            member.transition_time2 = member.cu_time - member.t_begin_time
 
             # Fine resolution time index needed for RWP
             member.cu_fine_index = abs(member.rwp.time_fine - member.cu_time).argmin().data
             member.rwp_mean = member.rwp[member.sc_fine_index:member.cu_fine_index+1].mean()*1e3
+            member.rwp_mean2 = member.rwp[member.t_begin_ind_fine:member.cu_fine_index+1].mean()*1e3
 
         # Where no Cu is formed or it forms but then recovers - could split this for ones that form Cu 
         else:
@@ -71,6 +92,7 @@ def sorter(member, sc_thresh, cu_thresh):
             member.cu_fine_index = None
             member.transition_time = None
             member.rwp_mean = None
+            member.rwp_mean2 = None
 
     # Where no Sc is formed
     else:
@@ -79,11 +101,15 @@ def sorter(member, sc_thresh, cu_thresh):
         member.sc_ind = None
         member.sc_time = None
         member.sc_fine_index = None
+        member.t_begin_ind = None
+        member.t_begin_time = None
+        member.t_begin_time_sc = None
         member.cu_ind = None
         member.cu_time = None
         member.cu_fine_index = None
         member.transition_time = None
         member.rwp_mean = None
+        member.rwp_mean2 = None
 
 
 class Member:
@@ -92,7 +118,7 @@ class Member:
         self.index = index
         self.id = f"{key}{index}"
         self.inputs = inputs
-        self.ds = xr.open_dataset(f"/gws/nopw/j04/carisma/eers/sct/processed/main_ensemble/sct_{key}{index}_pp.nc")
+        self.ds = xr.open_dataset(f"/gws/nopw/j04/carisma/eers/sct/combined_processed/sct_{key}{index}_pp.nc")
 
 
 class ICE_Member:
@@ -117,7 +143,7 @@ class Ensemble:
         self.cu_thresh = cu_thresh
         # Assign names and labels
         self.parameter_names = ['qv_bl','inv','delt','delq','na','baut']
-        self.parameter_labels = ['$BL~q_{v}$', '$BL~z$', r'$\Delta~\theta$', '$\Delta~q_{v}$', '$BL~N_{a}$', '10^{$b_{aut}$}']
+        self.parameter_labels = [r'$BL~q_{v}$', r'$BL~z$', r'$\Delta~\theta$', r'$\Delta~q_{v}$', r'$BL~N_{a}$', r'10^{$b_{aut}$}']
         self.axes_labels = [(7, 11), (500, 1300), (2, 21), (-7, -1), (10, 500), (10**(-2.3), 10**(-1.3))]
 
         # Load Latin hypercube design (including spinup or not)
@@ -271,3 +297,6 @@ class Ensemble:
                                                  coords=dict(time_fine=rwp_times_mean[:rwp_mean_isnan[-1]+1]),
                                                  attrs=dict(description="mean rwp of ice"))
             sorter(member, self.sc_thresh, self.cu_thresh)
+
+            if member.id not in self.member_sct_keys and member.transition_time is not None:
+                self.member_sct_keys.insert(0, member.id)
