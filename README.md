@@ -1,1 +1,3 @@
 Stratocumulus-to-cumulus transitions are driven by numerous interacting cloud-controlling factors, and understanding these interactions can improve the accuracy of cloud responses to climate changes in global climate models. Here, we analyse a perturbed parameter ensemble of large-eddy simulations that explore the transition in the North East Pacific.
+
+The PPE can be loaded into scripts for analysis using the PPE class module in py_scripts (ppe_class_lib). An instance of this class creates a PPE object where each member of the PPE is it's own attribute with a dataset (member.ds e.g., em0.ds) and many attributes automatically assigned (like transition time and start time of Stratocumulus being present (sc) and the start time of cumulus being present (cu). 
